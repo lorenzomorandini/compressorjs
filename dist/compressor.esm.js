@@ -5,7 +5,7 @@
  * Copyright 2018-present Chen Fengyuan
  * Released under the MIT license
  *
- * Date: 2021-10-05T02:32:40.212Z
+ * Date: 2022-10-13T13:09:08.771Z
  */
 
 function ownKeys(object, enumerableOnly) {
@@ -308,6 +308,12 @@ var DEFAULTS = {
    * @type {number}
    */
   quality: 0.8,
+
+  /**
+   * If set `true`, the compressed image will retain exif.
+   * @type {boolean}
+  */
+  retainExif: false,
 
   /**
    * The mime type of the output image.
@@ -649,9 +655,103 @@ function getAdjustedSizes(_ref) {
     height: height
   };
 }
+function getEXIF(arrayBuffer) {
+  var head = 0;
+  var segments = [];
+  var length;
+  var endPoint;
+  var seg;
+  var arr = [].slice.call(new Uint8Array(arrayBuffer), 0);
+
+  while (true) {
+    // SOS(Start of Scan)
+    if (arr[head] === 0xff && arr[head + 1] === 0xda) {
+      break;
+    } // SOI(Start of Image)
+
+
+    if (arr[head] === 0xff && arr[head + 1] === 0xd8) {
+      head += 2;
+    } else {
+      length = arr[head + 2] * 256 + arr[head + 3];
+      endPoint = head + length + 2;
+      seg = arr.slice(head, endPoint);
+      head = endPoint;
+      segments.push(seg);
+    }
+
+    if (head > arr.length) {
+      break;
+    }
+  }
+
+  if (!segments.length) {
+    return [];
+  }
+
+  var res = [];
+
+  for (var x = 0; x < segments.length; x += 1) {
+    var s = segments[x];
+
+    if (s[0] === 0xff && s[1] === 0xe1) {
+      res = res.concat(s);
+    }
+  }
+
+  return res;
+}
+function insertEXIF(resizedImg, exifArr) {
+  var arr = [].slice.call(new Uint8Array(resizedImg), 0);
+
+  if (arr[2] !== 0xff || arr[3] !== 0xe0) {
+    return resizedImg;
+  }
+
+  var app0Length = arr[4] * 256 + arr[5];
+  var newImg = [0xff, 0xd8].concat(exifArr, arr.slice(4 + app0Length));
+  return new Uint8Array(newImg);
+}
+function dataURItoBlob(dataURI) {
+  var mimeType = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : null;
+  var mimeString = mimeType || dataURI.split(',')[0].split(':')[1].split(';')[0];
+  var byteString = atob(dataURI.split(',')[1]);
+  var arrayBuffer = new ArrayBuffer(byteString.length);
+  var intArray = new Uint8Array(arrayBuffer);
+
+  for (var i = 0; i < byteString.length; i += 1) {
+    intArray[i] = byteString.charCodeAt(i);
+  }
+
+  return new Blob([intArray], {
+    type: mimeString
+  });
+}
+function base64ToArrayBuffer(base64) {
+  base64 = base64.replace(/^data:([^;]+);base64,/gim, '');
+  var binary = atob(base64);
+  var len = binary.length;
+  var buffer = new ArrayBuffer(len);
+  var view = new Uint8Array(buffer);
+
+  for (var i = 0; i < len; i += 1) {
+    view[i] = binary.charCodeAt(i);
+  }
+
+  return buffer;
+}
+function blobToBase64(blob, callback) {
+  var reader = new FileReader();
+
+  reader.onloadend = function () {
+    callback(reader.result);
+  };
+
+  reader.readAsDataURL(blob);
+}
 
 var ArrayBuffer$1 = WINDOW.ArrayBuffer,
-    FileReader = WINDOW.FileReader;
+    FileReader$1 = WINDOW.FileReader;
 var URL = WINDOW.URL || WINDOW.webkitURL;
 var REGEXP_EXTENSION = /\.\w+$/;
 var AnotherCompressor = WINDOW.Compressor;
@@ -672,6 +772,7 @@ var Compressor = /*#__PURE__*/function () {
     this.file = file;
     this.image = new Image();
     this.options = _objectSpread2(_objectSpread2({}, DEFAULTS), options);
+    this.exif = [];
     this.aborted = false;
     this.result = null;
     this.init();
@@ -680,7 +781,7 @@ var Compressor = /*#__PURE__*/function () {
   _createClass(Compressor, [{
     key: "init",
     value: function init() {
-      var _this = this;
+      var _this2 = this;
 
       var file = this.file,
           options = this.options;
@@ -697,7 +798,7 @@ var Compressor = /*#__PURE__*/function () {
         return;
       }
 
-      if (!URL || !FileReader) {
+      if (!URL || !FileReader$1) {
         this.fail(new Error('The current browser does not support image compression.'));
         return;
       }
@@ -711,7 +812,7 @@ var Compressor = /*#__PURE__*/function () {
           url: URL.createObjectURL(file)
         });
       } else {
-        var reader = new FileReader();
+        var reader = new FileReader$1();
         var checkOrientation = options.checkOrientation && mimeType === 'image/jpeg';
         this.reader = reader;
 
@@ -719,6 +820,10 @@ var Compressor = /*#__PURE__*/function () {
           var target = _ref.target;
           var result = target.result;
           var data = {};
+
+          if (options.retainExif) {
+            _this2.exif = getEXIF(result);
+          }
 
           if (checkOrientation) {
             // Reset the orientation value to its default value 1
@@ -739,19 +844,19 @@ var Compressor = /*#__PURE__*/function () {
             data.url = result;
           }
 
-          _this.load(data);
+          _this2.load(data);
         };
 
         reader.onabort = function () {
-          _this.fail(new Error('Aborted to read the image with FileReader.'));
+          _this2.fail(new Error('Aborted to read the image with FileReader.'));
         };
 
         reader.onerror = function () {
-          _this.fail(new Error('Failed to read the image with FileReader.'));
+          _this2.fail(new Error('Failed to read the image with FileReader.'));
         };
 
         reader.onloadend = function () {
-          _this.reader = null;
+          _this2.reader = null;
         };
 
         if (checkOrientation) {
@@ -764,24 +869,24 @@ var Compressor = /*#__PURE__*/function () {
   }, {
     key: "load",
     value: function load(data) {
-      var _this2 = this;
+      var _this3 = this;
 
       var file = this.file,
           image = this.image;
 
       image.onload = function () {
-        _this2.draw(_objectSpread2(_objectSpread2({}, data), {}, {
+        _this3.draw(_objectSpread2(_objectSpread2({}, data), {}, {
           naturalWidth: image.naturalWidth,
           naturalHeight: image.naturalHeight
         }));
       };
 
       image.onabort = function () {
-        _this2.fail(new Error('Aborted to load the image.'));
+        _this3.fail(new Error('Aborted to load the image.'));
       };
 
       image.onerror = function () {
-        _this2.fail(new Error('Failed to load the image.'));
+        _this3.fail(new Error('Failed to load the image.'));
       }; // Match all browsers that use WebKit as the layout engine in iOS devices,
       // such as Safari for iOS, Chrome for iOS, and in-app browsers.
 
@@ -797,7 +902,7 @@ var Compressor = /*#__PURE__*/function () {
   }, {
     key: "draw",
     value: function draw(_ref2) {
-      var _this3 = this;
+      var _this4 = this;
 
       var naturalWidth = _ref2.naturalWidth,
           naturalHeight = _ref2.naturalHeight,
@@ -960,13 +1065,25 @@ var Compressor = /*#__PURE__*/function () {
         return;
       }
 
+      var that = this;
+
       var done = function done(result) {
-        if (!_this3.aborted) {
-          _this3.done({
-            naturalWidth: naturalWidth,
-            naturalHeight: naturalHeight,
-            result: result
-          });
+        if (!_this4.aborted) {
+          if (options.retainExif && result) {
+            blobToBase64(result, function (base64) {
+              that.done({
+                naturalWidth: naturalWidth,
+                naturalHeight: naturalHeight,
+                result: dataURItoBlob(arrayBufferToDataURL(insertEXIF(base64ToArrayBuffer(base64, options.mimeType), that.exif), options.mimeType))
+              }, that);
+            });
+          } else {
+            _this4.done({
+              naturalWidth: naturalWidth,
+              naturalHeight: naturalHeight,
+              result: result
+            });
+          }
         }
       };
 
@@ -982,9 +1099,13 @@ var Compressor = /*#__PURE__*/function () {
       var naturalWidth = _ref7.naturalWidth,
           naturalHeight = _ref7.naturalHeight,
           result = _ref7.result;
-      var file = this.file,
-          image = this.image,
-          options = this.options;
+
+      var _this = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : undefined;
+
+      var that = _this || this;
+      var file = that.file,
+          image = that.image,
+          options = that.options;
 
       if (URL && !options.checkOrientation) {
         URL.revokeObjectURL(image.src);
